@@ -6,6 +6,7 @@ use crate::optimizer::lbf::LBFBuilder;
 use crate::optimizer::separator::Separator;
 use crate::util::listener::{ReportType, SolutionListener};
 use crate::util::terminator::Terminator;
+use jagua_rs::geometry::DTransformation;
 use jagua_rs::probs::spp::entities::{SPInstance, SPSolution};
 use log::info;
 use rand::{Rng, SeedableRng};
@@ -19,6 +20,12 @@ pub mod explore;
 pub mod compress;
 
 ///Algorithm 11 from https://doi.org/10.48550/arXiv.2509.13329
+///
+/// `frozen` pins the given items at fixed transforms for the whole run: they
+/// are placed as ordinary items (so real items collide with and pack around
+/// them) but are never moved, swapped or shifted by the separators. Item ids
+/// `>= min(frozen ids)` are treated as frozen. Pass `&[]` for a normal run.
+#[allow(clippy::too_many_arguments)]
 pub fn optimize(
     instance: SPInstance,
     mut rng: Xoshiro256PlusPlus,
@@ -26,14 +33,20 @@ pub fn optimize(
     terminator: &mut impl Terminator,
     expl_config: &ExplorationConfig,
     cmpr_config: &CompressionConfig,
-    initial_solution: Option<&SPSolution>
+    initial_solution: Option<&SPSolution>,
+    frozen: &[(usize, DTransformation)],
 ) -> SPSolution {
     let mut next_rng = || Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
-    
+
+    // Any item id at or above the lowest frozen id is a frozen item. Callers
+    // append the frozen items after the real ones, so this cleanly partitions
+    // the id space; empty frozen list => threshold usize::MAX => nothing pinned.
+    let frozen_threshold = frozen.iter().map(|(id, _)| *id).min().unwrap_or(usize::MAX);
+
     // First build an initial solution if none is provided
     let start_prob = match initial_solution {
         None => {
-            let builder = LBFBuilder::new(instance.clone(), next_rng(), LBF_SAMPLE_CONFIG).construct();
+            let builder = LBFBuilder::new(instance.clone(), next_rng(), LBF_SAMPLE_CONFIG, frozen.to_vec(), frozen_threshold).construct();
             builder.prob
         }
         Some(init_sol) => {
@@ -46,7 +59,7 @@ pub fn optimize(
 
     // Begin by executing the exploration phase
     terminator.new_timeout(expl_config.time_limit);
-    let mut expl_separator = Separator::new(instance.clone(), start_prob, next_rng(), expl_config.separator_config);
+    let mut expl_separator = Separator::new(instance.clone(), start_prob, next_rng(), expl_config.separator_config, frozen_threshold);
     let solutions = exploration_phase(
         &instance,
         &mut expl_separator,
@@ -58,7 +71,7 @@ pub fn optimize(
 
     // Start the compression phase from the final solution from the exploration phase
     terminator.new_timeout(cmpr_config.time_limit);
-    let mut cmpr_separator = Separator::new(expl_separator.instance, expl_separator.prob, next_rng(), cmpr_config.separator_config);
+    let mut cmpr_separator = Separator::new(expl_separator.instance, expl_separator.prob, next_rng(), cmpr_config.separator_config, frozen_threshold);
     let cmpr_sol = compression_phase(
         &instance,
         &mut cmpr_separator,
