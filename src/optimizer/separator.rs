@@ -35,10 +35,13 @@ pub struct Separator {
     pub workers: Vec<SeparatorWorker>,
     pub config: SeparatorConfig,
     pub thread_pool: Option<ThreadPool>,
+    /// Item ids `>= frozen_item_id_threshold` are pinned: excluded from moves,
+    /// swaps and the strip-resize shift. `usize::MAX` = no frozen items.
+    pub frozen_item_id_threshold: usize,
 }
 
 impl Separator {
-    pub fn new(instance: SPInstance, prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig) -> Self {
+    pub fn new(instance: SPInstance, prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig, frozen_item_id_threshold: usize) -> Self {
         let ct = CollisionTracker::new(&prob.layout);
         let workers = (0..config.n_workers).map(|_|
             SeparatorWorker {
@@ -47,6 +50,7 @@ impl Separator {
                 ct: ct.clone(),
                 rng: Xoshiro256PlusPlus::seed_from_u64(rng.random()),
                 sample_config: config.sample_config,
+                frozen_item_id_threshold,
             }).collect();
 
         let pool = if cfg!(target_arch = "wasm32") {
@@ -65,6 +69,7 @@ impl Separator {
             workers,
             config,
             thread_pool: pool,
+            frozen_item_id_threshold,
         }
     }
 
@@ -238,8 +243,11 @@ impl Separator {
         let split_position = split_position.unwrap_or(self.prob.strip_width() / 2.0);
         let delta = new_width - self.prob.strip_width();
 
-        //shift all items right of the split position
+        //shift all items right of the split position, except frozen items:
+        //those stay pinned at their fixed x (a defect zone does not move when
+        //the strip is resized).
         let items_to_shift = self.prob.layout.placed_items.iter()
+            .filter(|(_, pi)| pi.item_id < self.frozen_item_id_threshold)
             .filter(|(_, pi)| pi.shape.centroid().0 > split_position)
             .map(|(k, pi)| (k, pi.d_transf))
             .collect_vec();
@@ -263,6 +271,7 @@ impl Separator {
                 ct: self.ct.clone(),
                 rng: Xoshiro256PlusPlus::seed_from_u64(self.rng.random()),
                 sample_config: self.config.sample_config,
+                frozen_item_id_threshold: self.frozen_item_id_threshold,
             };
         });
         debug!("[SEP] changed strip width to {:.3}", new_width);

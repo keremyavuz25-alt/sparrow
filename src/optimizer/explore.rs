@@ -87,8 +87,16 @@ pub fn exploration_phase(instance: &SPInstance, sep: &mut Separator, sol_listene
 }
 
 fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
-    if sep.prob.layout.placed_items.len() < 2 {
-        warn!("[DSRP] cannot disrupt solution with less than 2 items");
+    let frozen_threshold = sep.frozen_item_id_threshold;
+
+    // Disruption swaps two movable items; frozen (pinned) items are never
+    // eligible. Count only the movable ones so we don't try to pick two out
+    // of a set that is mostly (or entirely) frozen.
+    let n_movable = sep.prob.layout.placed_items.values()
+        .filter(|pi| pi.item_id < frozen_threshold)
+        .count();
+    if n_movable < 2 {
+        warn!("[DSRP] cannot disrupt solution with fewer than 2 movable items");
         return;
     }
 
@@ -137,6 +145,7 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
     // Step 2: Select two 'large' items and 'swap' them.
 
     let large_items = sep.prob.layout.placed_items.iter()
+        .filter(|(_, pi)| pi.item_id < frozen_threshold)
         .filter(|(_, pi)| pi.shape.surrogate().convex_hull_area >= ch_area_cutoff);
 
     //Choose a first item with a large enough convex hull
@@ -153,9 +162,10 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
         .choose(&mut sep.rng)
         .or_else(|| {
             sep.prob.layout.placed_items.iter()
-                .filter(|(pk, _)| *pk != pk1) // Ensure the second item is not the same as the first
+                // Ensure the second item is not the same as the first, and never frozen
+                .filter(|(pk, pi)| *pk != pk1 && pi.item_id < frozen_threshold)
                 .choose(&mut sep.rng)
-        }) // As a fallback, choose any item
+        }) // As a fallback, choose any movable item
         .expect("[EXPL] failed to choose second item for disruption");
 
     // Step 3: Swap the two items' positions in the layout.
@@ -183,6 +193,11 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
             .transform(&dt1_old.compose());
 
         for c1_pk in practically_contained_items(&sep.prob.layout, pk1).into_iter().filter(|c1_pk| *c1_pk != pk2) {
+            // Never move a frozen (pinned) item, even if it happens to be
+            // contained by the swapped item.
+            if sep.prob.layout.placed_items[c1_pk].item_id >= frozen_threshold {
+                continue;
+            }
             let c1_pi = &sep.prob.layout.placed_items[c1_pk];
 
             let new_dt = c1_pi.d_transf
@@ -202,6 +217,10 @@ fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) {
             .transform(&dt2_old.compose());
 
         for c2_pk in practically_contained_items(&sep.prob.layout, pk2).into_iter().filter(|c2_pk| *c2_pk != pk1) {
+            // Never move a frozen (pinned) item.
+            if sep.prob.layout.placed_items[c2_pk].item_id >= frozen_threshold {
+                continue;
+            }
             let c2_pi = &sep.prob.layout.placed_items[c2_pk];
             let new_dt = c2_pi.d_transf
                 .compose()
