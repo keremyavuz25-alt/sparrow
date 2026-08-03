@@ -42,7 +42,7 @@ pub struct Separator {
 
 impl Separator {
     pub fn new(instance: SPInstance, prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig, frozen_item_id_threshold: usize) -> Self {
-        let ct = CollisionTracker::new(&prob.layout);
+        let ct = CollisionTracker::new(&prob.layout, frozen_item_id_threshold);
         let workers = (0..config.n_workers).map(|_|
             SeparatorWorker {
                 instance: instance.clone(),
@@ -206,7 +206,7 @@ impl Separator {
             }
             None => {
                 //otherwise, rebuild it
-                self.ct = CollisionTracker::new(&self.prob.layout);
+                self.ct = CollisionTracker::new(&self.prob.layout, self.frozen_item_id_threshold);
             }
         }
     }
@@ -261,7 +261,7 @@ impl Separator {
         self.prob.change_strip_width(new_width);
 
         //rebuild the collision tracker
-        self.ct = CollisionTracker::new(&self.prob.layout);
+        self.ct = CollisionTracker::new(&self.prob.layout, self.frozen_item_id_threshold);
 
         //rebuild the workers
         self.workers.iter_mut().for_each(|opt| {
