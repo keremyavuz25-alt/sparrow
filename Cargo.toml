@@ -38,14 +38,17 @@ clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
 
 getrandom = { version = "0.4", features = ["wasm_js"] }
+wide = { version = "1.7", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ctrlc = "3.5"
 
 [features]
+default = ["simd"]
 live_svg = []
 only_final_svg = []
-simd = []
+# Vectorised collision quantification (stable toolchain, via `wide`)
+simd = ["dep:wide"]
 
 [profile.dev]
 overflow-checks = true
