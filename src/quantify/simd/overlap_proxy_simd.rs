@@ -5,22 +5,21 @@ use jagua_rs::geometry::fail_fast::SPSurrogate;
 use jagua_rs::geometry::geo_traits::DistanceTo;
 use jagua_rs::geometry::primitives::{Circle, Point};
 use std::f32::consts::PI;
-use std::simd::Select;
-use std::simd::Simd;
+use wide::f32x8;
 
-/// Width of the SIMD vector
-const SIMD_WIDTH: usize = 4;
+/// Width of the SIMD vector (8 lanes: one AVX register, two NEON registers).
+const SIMD_WIDTH: usize = 8;
 
-#[allow(non_camel_case_types)]
-type f32xN = Simd<f32,SIMD_WIDTH>;
-
-/// SIMD version of [`poles_overlap_area_proxy`] with configurable vector width.
+/// SIMD version of [`overlap_area_proxy`] on the STABLE toolchain (via the `wide` crate).
 /// `p2` should match the poles of `sp2`.
 #[inline(always)]
 pub fn poles_overlap_area_proxy_simd(sp1: &SPSurrogate, sp2: &SPSurrogate, epsilon: f32, p2: &CirclesSoA) -> f32 {
     poles_overlap_area_proxy_simd_bounded(sp1, sp2, epsilon, p2, f32::INFINITY).unwrap()
 }
 
+/// Bounded variant: returns `None` as soon as the accumulated (unscaled) overlap
+/// exceeds `max_unscaled_overlap` — the caller already knows the sample cannot win.
+/// Math is identical to the scalar proxy; only the lane summation order differs.
 #[inline(always)]
 pub fn poles_overlap_area_proxy_simd_bounded(
     sp1: &SPSurrogate,
@@ -29,55 +28,50 @@ pub fn poles_overlap_area_proxy_simd_bounded(
     p2: &CirclesSoA,
     max_unscaled_overlap: f32,
 ) -> Option<f32> {
-    use std::simd::prelude::{SimdFloat, SimdPartialOrd};
-    use std::simd::StdFloat;
+    let e_n = f32x8::splat(epsilon);
+    let e_sq_n = f32x8::splat(epsilon * epsilon);
+    let two_e_n = f32x8::splat(2.0 * epsilon);
 
-    let e_n = f32xN::splat(epsilon);
-    let e_sq_n = f32xN::splat(epsilon * epsilon);
-    let two_e_n = f32xN::splat(2.0 * epsilon);
+    let chunks = p2.x.len() / SIMD_WIDTH;
+    let remaining_idx = chunks * SIMD_WIDTH;
 
     let mut total_overlap = 0.0;
     for p1 in sp1.poles.iter() {
         //common values for all chunks
-        let r1 = p1.radius;
-        let x1_n = f32xN::splat(p1.center.x());
-        let y1_n = f32xN::splat(p1.center.y());
-        let r1_n = f32xN::splat(r1);
+        let x1_n = f32x8::splat(p1.center.x());
+        let y1_n = f32x8::splat(p1.center.y());
+        let r1_n = f32x8::splat(p1.radius);
 
         //process complete chunks with SIMD
-        let chunks = p2.x.len() / SIMD_WIDTH;
-
         for chunk in 0..chunks {
             let idx = chunk * SIMD_WIDTH;
 
             // load the next N elements from p2
-            let x2 = f32xN::from_slice(&p2.x[idx..idx + SIMD_WIDTH]);
-            let y2 = f32xN::from_slice(&p2.y[idx..idx + SIMD_WIDTH]);
-            let r2 = f32xN::from_slice(&p2.r[idx..idx + SIMD_WIDTH]);
+            let x2 = f32x8::from(<[f32; SIMD_WIDTH]>::try_from(&p2.x[idx..idx + SIMD_WIDTH]).unwrap());
+            let y2 = f32x8::from(<[f32; SIMD_WIDTH]>::try_from(&p2.y[idx..idx + SIMD_WIDTH]).unwrap());
+            let r2 = f32x8::from(<[f32; SIMD_WIDTH]>::try_from(&p2.r[idx..idx + SIMD_WIDTH]).unwrap());
 
-            // calculate pd
+            // penetration depth
             let dx = x1_n - x2;
             let dy = y1_n - y2;
-
             let pd = r1_n + r2 - (dx * dx + dy * dy).sqrt();
 
-            // calculate pd_decay
+            // decaying penetration depth: pd if pd >= epsilon, else eps^2 / (2 eps - pd)
             let pd_mask = pd.simd_ge(e_n);
-            let decay_values = e_sq_n / (-pd + two_e_n);
-            let pd_decay = pd_mask.select(pd, decay_values);
+            let decay_values = e_sq_n / (two_e_n - pd);
+            let pd_decay = pd_mask.blend(pd, decay_values);
 
-            // calculate min radius
-            let min_r = r1_n.simd_min(r2);
+            // weight by the smaller pole
+            let min_r = r1_n.min(r2);
 
-            total_overlap += (pd_decay * min_r).reduce_sum();
+            total_overlap += (pd_decay * min_r).reduce_add();
         }
 
         //process remaining elements with scalar operations
-        let remaining_idx = chunks * SIMD_WIDTH;
         for j in remaining_idx..p2.x.len() {
-            let p2 = Circle { 
-                center : Point(p2.x[j], p2.y[j]), 
-                radius: p2.r[j]
+            let p2 = Circle {
+                center: Point(p2.x[j], p2.y[j]),
+                radius: p2.r[j],
             };
 
             //penetration depth between the two poles (circles)
@@ -95,7 +89,7 @@ pub fn poles_overlap_area_proxy_simd_bounded(
             return None;
         }
     }
-    
+
     total_overlap *= PI;
 
     debug_assert!(

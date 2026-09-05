@@ -1,4 +1,3 @@
-#![cfg_attr(feature = "simd", feature(portable_simd))]
 #![allow(const_item_mutation)]
 #![allow(unused_imports)]
 
