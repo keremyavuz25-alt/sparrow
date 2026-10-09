@@ -9,7 +9,9 @@ use jagua_rs::entities::PItemKey;
 use jagua_rs::geometry::DTransformation;
 use jagua_rs::probs::spp::entities::{SPPlacement, SPProblem, SPSolution};
 use log::debug;
-use rand::prelude::SliceRandom;
+use rand::prelude::{IndexedRandom, SliceRandom};
+use rand::RngExt;
+use crate::sample::uniform_sampler::convert_sample_to_closest_feasible;
 use std::iter::Sum;
 use std::ops::AddAssign;
 use rand::rngs::Xoshiro256PlusPlus;
@@ -22,7 +24,17 @@ pub struct SeparatorWorker {
     pub sample_config: SampleConfig,
     /// Fork: item idxs `>= frozen_item_id_threshold` are pinned and never moved.
     pub frozen_item_id_threshold: usize,
+    /// Fork experiment: swap move (see `SeparatorConfig::swap_prob`).
+    pub swap_prob: f32,
+    pub swap_tau: usize,
+    /// Consecutive non-improving separator iterations (set by the master each round).
+    pub stagnation: usize,
+    /// Swaps kept since the worker was built (diagnostics).
+    pub n_swaps: usize,
 }
+
+/// Two items are "similar-sized" when their diameters are within this ratio.
+const SWAP_SIMILARITY: f32 = 1.3;
 
 impl SeparatorWorker {
     pub fn load(&mut self, sol: &SPSolution, ct: &CollisionTracker) {
@@ -45,14 +57,38 @@ impl SeparatorWorker {
         let mut total_moves = 0;
         let mut total_evals = 0;
 
+        let swap_p = if self.swap_tau > 0 {
+            self.swap_prob * (self.stagnation as f32 / self.swap_tau as f32).min(1.0)
+        } else {
+            self.swap_prob
+        };
+
         // Give each colliding item the opportunity to move to a better (eval) position
         for &pk in candidates.iter() {
+            // A swap earlier in this pass may have re-keyed this item: skip it.
+            if !self.prob.layout().placed_items().contains_key(pk) {
+                continue;
+            }
             // First check if the item is still colliding
             if self.ct.get_loss(pk) > 0.0 {
-                let item = self.prob.layout().placed_items()[pk].item();
+                let pk = if swap_p > 0.0 && self.rng.random::<f32>() < swap_p {
+                    // Even a reverted swap re-keys the item: always use the returned key.
+                    let (pk_now, kept) = self.try_swap(pk);
+                    if kept {
+                        self.n_swaps += 1;
+                        if self.ct.get_loss(pk_now) == 0.0 {
+                            continue;
+                        }
+                    }
+                    pk_now
+                } else {
+                    pk
+                };
+                let item = self.prob.layout().placed_items()[pk].item().clone();
+                let item = item.as_ref();
 
                 // Create an 'evaluator' to perform collision detection and collision quantification of the samples during the search
-                let evaluator = SeparationEvaluator::new(self.prob.layout(), item, pk, &self.ct);
+                let evaluator = SeparationEvaluator::new(self.prob.layout(), item, pk, &self.ct, (self.sample_config.clear_x, self.sample_config.clear_y, self.sample_config.clear_contact));
 
                 // Perform the search for a better position for the item
                 let (best_sample, n_evals) =
@@ -67,6 +103,53 @@ impl SeparatorWorker {
             }
         }
         SepStats { total_moves, total_evals }
+    }
+
+    /// Fork experiment: exchange the positions of `pk_a` and a random similar-sized
+    /// movable item (rotations snapped to each item's feasible set). Returns item
+    /// A's current key (it changes even when the swap is reverted) and whether
+    /// the swap was kept.
+    fn try_swap(&mut self, pk_a: PItemKey) -> (PItemKey, bool) {
+        let (item_a, dt_a, diam_a, area_a) = {
+            let pi = &self.prob.layout().placed_items()[pk_a];
+            (pi.item().clone(), pi.d_transf(), pi.shape().diameter(), pi.shape().area())
+        };
+        let frozen = self.frozen_item_id_threshold;
+        let cands = self.prob.layout().placed_items().iter()
+            .filter(|(pk, pi)| *pk != pk_a && pi.item().idx() != item_a.idx() && pi.item().idx() < frozen)
+            .filter(|(_, pi)| {
+                let rd = pi.shape().diameter() / diam_a;
+                let ra = pi.shape().area() / area_a;
+                rd > 1.0 / SWAP_SIMILARITY && rd < SWAP_SIMILARITY
+                    && ra > 1.0 / (SWAP_SIMILARITY * SWAP_SIMILARITY) && ra < SWAP_SIMILARITY * SWAP_SIMILARITY
+            })
+            .map(|(pk, pi)| (pk, pi.item().clone(), pi.d_transf()))
+            .collect_vec();
+        let Some((pk_b, item_b, dt_b)) = cands.choose(&mut self.rng).cloned() else {
+            return (pk_a, false);
+        };
+
+        let w_before = self.ct.get_total_weighted_loss();
+        let new_dt_a = convert_sample_to_closest_feasible(dt_b, &item_a);
+        let new_dt_b = convert_sample_to_closest_feasible(dt_a, &item_b);
+        let pk_a2 = self.relocate(pk_a, item_a.idx(), new_dt_a);
+        let pk_b2 = self.relocate(pk_b, item_b.idx(), new_dt_b);
+        let w_after = self.ct.get_total_weighted_loss();
+
+        if self.swap_tau > 0 || w_after < w_before {
+            debug!("Swapped items {} <-> {}: wl {} -> {}", item_a.idx(), item_b.idx(), FMT().fmt2(w_before), FMT().fmt2(w_after));
+            (pk_a2, true)
+        } else {
+            self.relocate(pk_b2, item_b.idx(), dt_b);
+            (self.relocate(pk_a2, item_a.idx(), dt_a), false)
+        }
+    }
+
+    fn relocate(&mut self, pk: PItemKey, item_idx: usize, d_transf: DTransformation) -> PItemKey {
+        self.prob.remove_item(pk);
+        let new_pk = self.prob.place_item(SPPlacement { d_transf, item_idx });
+        self.ct.register_item_move(self.prob.layout(), pk, new_pk);
+        new_pk
     }
 
     pub fn move_item(&mut self, pk: PItemKey, d_transf: DTransformation) -> PItemKey {

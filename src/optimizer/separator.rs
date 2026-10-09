@@ -25,6 +25,13 @@ pub struct SeparatorConfig {
     pub n_workers: usize,
     pub log_level: Level,
     pub sample_config: SampleConfig,
+    /// Fork experiment — swap move (Elkeran 2013 / FLD 2016): probability that a
+    /// colliding item first tries to exchange positions with a similar-sized item.
+    /// 0.0 = off (stock sparrow).
+    pub swap_prob: f32,
+    /// 0 = swap kept only when it lowers the weighted loss; >0 = FLD rule
+    /// (probability ramps with stagnation `min(1, stale/tau)`, always kept).
+    pub swap_tau: usize,
 }
 
 pub struct Separator {
@@ -50,6 +57,10 @@ impl Separator {
                 rng: Xoshiro256PlusPlus::seed_from_u64(rng.random()),
                 sample_config: config.sample_config,
                 frozen_item_id_threshold,
+                swap_prob: config.swap_prob,
+                swap_tau: config.swap_tau,
+                stagnation: 0,
+                n_swaps: 0,
             }).collect();
 
         let pool = if cfg!(target_arch = "wasm32") {
@@ -96,7 +107,7 @@ impl Separator {
 
             while n_iter_no_improvement < self.config.iter_no_imprv_limit {
                 let (loss_before, w_loss_before) = (self.ct.get_total_loss(), self.ct.get_total_weighted_loss(),);
-                sep_stats += self.move_items_multi();
+                sep_stats += self.move_items_multi(n_iter_no_improvement);
                 let (loss, w_loss) = (self.ct.get_total_loss(), self.ct.get_total_weighted_loss(),);
 
                 debug!("[SEP] [s:{n_strikes},i:{n_iter}] ( ) l: {} -> {}, wl: {} -> {}, (min l: {})", FMT().fmt2(loss_before), FMT().fmt2(loss), FMT().fmt2(w_loss_before), FMT().fmt2(w_loss), FMT().fmt2(min_loss));
@@ -140,6 +151,10 @@ impl Separator {
         }
         let secs = start.elapsed().as_secs_f32();
         self.total_evals += sep_stats.total_evals;
+        let n_swaps: usize = self.workers.iter().map(|w| w.n_swaps).sum();
+        if n_swaps > 0 {
+            log!(self.config.log_level, "[SEP] swaps kept (all workers): {n_swaps}");
+        }
         log!(self.config.log_level, "[SEP] finished, evals/s: {} K, evals/move: {}, moves/s: {}, iter/s: {}, #workers: {}, total {:.3}s",
             (sep_stats.total_evals as f32/ (1000.0 * secs)) as usize,
             FMT().fmt2(sep_stats.total_evals as f32 / sep_stats.total_moves as f32),
@@ -161,8 +176,9 @@ impl Separator {
     }
 
     /// Algorithm 10 from https://doi.org/10.48550/arXiv.2509.13329
-    fn move_items_multi(&mut self) -> SepStats {
+    fn move_items_multi(&mut self, stagnation: usize) -> SepStats {
         let master_sol = self.prob.save();
+        self.workers.iter_mut().for_each(|w| w.stagnation = stagnation);
 
         // Define the parallel execution closure
         let mut separate_multi = || -> SepStats {
@@ -276,6 +292,10 @@ impl Separator {
                 rng: Xoshiro256PlusPlus::seed_from_u64(self.rng.random()),
                 sample_config: self.config.sample_config,
                 frozen_item_id_threshold: self.frozen_item_id_threshold,
+                swap_prob: self.config.swap_prob,
+                swap_tau: self.config.swap_tau,
+                stagnation: 0,
+                n_swaps: 0,
             };
         });
         debug!("[SEP] changed strip width to {:.3}", new_width);

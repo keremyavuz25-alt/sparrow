@@ -14,6 +14,14 @@ pub struct SampleConfig {
     pub n_container_samples: usize,
     pub n_focussed_samples: usize,
     pub n_coord_descents: usize,
+    /// Fork experiment: "gravity" tie-breaker among collision-free samples —
+    /// `Clear` loss = clear_x·bbox.x_max + clear_y·bbox.y_min (0/0 = stock).
+    pub clear_x: f32,
+    pub clear_y: f32,
+    /// Fork experiment: "contact" tie-breaker — `Clear` loss += clear_contact ×
+    /// mean gap from the item's surrogate poles to the nearest neighbour pole
+    /// or strip edge (capped). 0 = off.
+    pub clear_contact: f32,
 }
 
 /// Algorithm 6 and Figure 7 from https://doi.org/10.48550/arXiv.2509.13329
