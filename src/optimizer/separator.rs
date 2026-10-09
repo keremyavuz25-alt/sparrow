@@ -35,17 +35,21 @@ pub struct Separator {
     pub workers: Vec<SeparatorWorker>,
     pub config: SeparatorConfig,
     pub thread_pool: Option<ThreadPool>,
+    /// Fork: item idxs `>= frozen_item_id_threshold` are pinned: excluded from
+    /// moves, swaps and the strip-resize shift. `usize::MAX` = no frozen items.
+    pub frozen_item_id_threshold: usize,
 }
 
 impl Separator {
-    pub fn new(prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig) -> Self {
-        let ct = CollisionTracker::new(prob.layout());
+    pub fn new(prob: SPProblem, mut rng: Xoshiro256PlusPlus, config: SeparatorConfig, frozen_item_id_threshold: usize) -> Self {
+        let ct = CollisionTracker::new(prob.layout(), frozen_item_id_threshold);
         let workers = (0..config.n_workers).map(|_|
             SeparatorWorker {
                 prob: prob.clone(),
                 ct: ct.clone(),
                 rng: Xoshiro256PlusPlus::seed_from_u64(rng.random()),
                 sample_config: config.sample_config,
+                frozen_item_id_threshold,
             }).collect();
 
         let pool = if cfg!(target_arch = "wasm32") {
@@ -64,6 +68,7 @@ impl Separator {
             workers,
             config,
             thread_pool: pool,
+            frozen_item_id_threshold,
         }
     }
 
@@ -201,7 +206,7 @@ impl Separator {
             }
             None => {
                 //otherwise, rebuild it
-                self.ct = CollisionTracker::new(self.prob.layout());
+                self.ct = CollisionTracker::new(self.prob.layout(), self.frozen_item_id_threshold);
             }
         }
     }
@@ -238,8 +243,10 @@ impl Separator {
         let split_position = split_position.unwrap_or(self.prob.strip_width() / 2.0);
         let delta = new_width - self.prob.strip_width();
 
-        //shift all items right of the split position
+        //shift all items right of the split position, except frozen items (fork):
+        //those stay pinned at their fixed x.
         let items_to_shift = self.prob.layout().placed_items().iter()
+            .filter(|(_, pi)| pi.item().idx() < self.frozen_item_id_threshold)
             .filter(|(_, pi)| pi.shape().centroid().0 > split_position)
             .map(|(k, pi)| (k, pi.d_transf()))
             .collect_vec();
@@ -259,7 +266,7 @@ impl Separator {
         }
 
         //rebuild the collision tracker
-        self.ct = CollisionTracker::new(self.prob.layout());
+        self.ct = CollisionTracker::new(self.prob.layout(), self.frozen_item_id_threshold);
 
         //rebuild the workers
         self.workers.iter_mut().for_each(|opt| {
@@ -268,6 +275,7 @@ impl Separator {
                 ct: self.ct.clone(),
                 rng: Xoshiro256PlusPlus::seed_from_u64(self.rng.random()),
                 sample_config: self.config.sample_config,
+                frozen_item_id_threshold: self.frozen_item_id_threshold,
             };
         });
         debug!("[SEP] changed strip width to {:.3}", new_width);

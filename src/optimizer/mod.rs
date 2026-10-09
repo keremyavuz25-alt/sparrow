@@ -8,7 +8,7 @@ use crate::util::listener::{OptimizationPhase, ReportType, SolutionListener};
 use crate::util::terminator::Terminator;
 use jagua_rs::geometry::geo_enums::RotationRange;
 use jagua_rs::geometry::geo_traits::TransformableFrom;
-use jagua_rs::geometry::Transformation;
+use jagua_rs::geometry::{DTransformation, Transformation};
 use jagua_rs::probs::spp::entities::{SPInstance, SPProblem, SPSolution};
 use log::info;
 use rand::{Rng, SeedableRng};
@@ -32,14 +32,20 @@ pub fn optimize(
     terminator: &mut impl Terminator,
     expl_config: &ExplorationConfig,
     cmpr_config: &CompressionConfig,
-    initial_solution: Option<&SPSolution>
+    initial_solution: Option<&SPSolution>,
+    frozen: &[(usize, DTransformation)],
 ) -> anyhow::Result<SPSolution> {
     let mut next_rng = || Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
-    
+
+    // Fork: any item idx at or above the lowest frozen idx is pinned. Callers
+    // append the frozen items after the real ones, so this cleanly partitions
+    // the idx space; empty frozen list => threshold usize::MAX => nothing pinned.
+    let frozen_threshold = frozen.iter().map(|(id, _)| *id).min().unwrap_or(usize::MAX);
+
     // First build an initial solution if none is provided
     let start_prob = match initial_solution {
         None => {
-            let builder = LBFBuilder::new(instance, next_rng(), LBF_SAMPLE_CONFIG)?.construct()?;
+            let builder = LBFBuilder::new(instance, next_rng(), LBF_SAMPLE_CONFIG, frozen.to_vec(), frozen_threshold)?.construct()?;
             builder.prob
         }
         Some(init_sol) => {
@@ -53,7 +59,7 @@ pub fn optimize(
     // Begin by executing the exploration phase
     sol_listener.report_phase(OptimizationPhase::Exploration);
     terminator.new_timeout(expl_config.time_limit);
-    let mut expl_separator = Separator::new(start_prob, next_rng(), expl_config.separator_config);
+    let mut expl_separator = Separator::new(start_prob, next_rng(), expl_config.separator_config, frozen_threshold);
     let solutions = exploration_phase(
         &mut expl_separator,
         sol_listener,
@@ -65,7 +71,7 @@ pub fn optimize(
     // Start the compression phase from the final solution from the exploration phase
     sol_listener.report_phase(OptimizationPhase::Compression);
     terminator.new_timeout(cmpr_config.time_limit);
-    let mut cmpr_separator = Separator::new(expl_separator.prob, next_rng(), cmpr_config.separator_config);
+    let mut cmpr_separator = Separator::new(expl_separator.prob, next_rng(), cmpr_config.separator_config, frozen_threshold);
     let cmpr_sol = compression_phase(
         &mut cmpr_separator,
         &final_explore_sol,

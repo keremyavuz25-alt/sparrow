@@ -20,6 +20,8 @@ pub struct SeparatorWorker {
     pub ct: CollisionTracker,
     pub rng: Xoshiro256PlusPlus,
     pub sample_config: SampleConfig,
+    /// Fork: item idxs `>= frozen_item_id_threshold` are pinned and never moved.
+    pub frozen_item_id_threshold: usize,
 }
 
 impl SeparatorWorker {
@@ -32,9 +34,11 @@ impl SeparatorWorker {
 
     /// Algorithm 5 from https://doi.org/10.48550/arXiv.2509.13329
     pub fn move_items(&mut self) -> SepStats {
-        // Collect all colliding items in a random order
-        let candidates = self.prob.layout().placed_items().keys()
-            .filter(|pk| self.ct.get_loss(*pk) > 0.0)
+        // Collect all colliding items in a random order. Frozen items are
+        // excluded (fork): pinned, never selected for a move.
+        let candidates = self.prob.layout().placed_items().iter()
+            .filter(|(pk, pi)| pi.item().idx() < self.frozen_item_id_threshold && self.ct.get_loss(*pk) > 0.0)
+            .map(|(pk, _)| pk)
             .collect_vec()
             .tap_mut(|v| v.shuffle(&mut self.rng));
 

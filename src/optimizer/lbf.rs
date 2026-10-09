@@ -2,6 +2,7 @@ use crate::eval::lbf_evaluator::LBFEvaluator;
 use crate::eval::sample_eval::SampleEval;
 use crate::sample::search::{search_placement, SampleConfig};
 use itertools::Itertools;
+use jagua_rs::geometry::DTransformation;
 use jagua_rs::probs::spp::entities::{SPInstance, SPPlacement, SPProblem};
 use jagua_rs::Instant;
 use log::debug;
@@ -31,6 +32,11 @@ pub struct LBFBuilder {
     pub prob: SPProblem,
     pub rng: Xoshiro256PlusPlus,
     pub sample_config: SampleConfig,
+    /// Fork: items pinned at a fixed transform. Placed first during `construct`
+    /// and never entered into the LBF search order.
+    pub frozen: Vec<(usize, DTransformation)>,
+    /// Item idxs `>= frozen_threshold` are frozen. `usize::MAX` = none.
+    pub frozen_threshold: usize,
 }
 
 impl LBFBuilder {
@@ -38,6 +44,8 @@ impl LBFBuilder {
         instance: SPInstance,
         rng: Xoshiro256PlusPlus,
         sample_config: SampleConfig,
+        frozen: Vec<(usize, DTransformation)>,
+        frozen_threshold: usize,
     ) -> anyhow::Result<Self> {
         let prob = SPProblem::new(instance.clone())?;
 
@@ -46,6 +54,8 @@ impl LBFBuilder {
             prob,
             rng,
             sample_config,
+            frozen,
+            frozen_threshold,
         })
     }
 
@@ -54,8 +64,15 @@ impl LBFBuilder {
     /// Returns an error if strip growth reaches the heuristic limit.
     pub fn construct(mut self) -> anyhow::Result<Self> {
         let start = Instant::now();
+
+        // Fork: place the pinned (frozen) items first at their fixed transforms.
+        for &(item_idx, d_transf) in &self.frozen {
+            self.prob.place_item(SPPlacement { item_idx, d_transf });
+        }
+
         let n_items = self.instance.items.len();
         let sorted_item_indices = (0..n_items)
+            .filter(|id| *id < self.frozen_threshold)
             .sorted_by_cached_key(|id| {
                 let item_shape = self.instance.item(*id).shape_cd().as_ref();
                 let convex_hull_area = item_shape.surrogate().convex_hull_area;

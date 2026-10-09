@@ -17,12 +17,16 @@ pub struct CollisionTracker {
     pub pk_idx_map: SecondaryMap<PItemKey, usize>,
     pub pair_collisions: PairMatrix,
     pub container_collisions: Vec<CTEntry>,
+    /// Fork: item idxs `>= frozen_item_id_threshold` are pinned and EXEMPT from
+    /// container-collision loss (a pinned obstacle sticking out past the strip
+    /// must not block shrinking). `usize::MAX` = no frozen items.
+    pub frozen_item_id_threshold: usize,
 }
 
 pub type CTSnapshot = CollisionTracker;
 
 impl CollisionTracker {
-    pub fn new(l: &Layout) -> Self {
+    pub fn new(l: &Layout, frozen_item_id_threshold: usize) -> Self {
         let size = l.placed_items().len();
 
         // Create the tracker
@@ -33,6 +37,7 @@ impl CollisionTracker {
                 .collect(),
             pair_collisions: PairMatrix::new(size),
             container_collisions: vec![CTEntry { weight: 1.0, loss: 0.0 }; size],
+            frozen_item_id_threshold,
         };
 
         // Recompute the loss for all items
@@ -74,6 +79,10 @@ impl CollisionTracker {
                     self.pair_collisions[(idx, idx_other)].loss = loss;
                 }
                 BasicHazardEntity::Exterior => {
+                    // Fork: frozen items are exempt from container loss.
+                    if pi.item().idx() >= self.frozen_item_id_threshold {
+                        continue;
+                    }
                     let loss = quantify_collision_poly_container(shape, l.container().outer_cd().bbox());
                     assert!(loss > 0.0, "loss for a collision should be > 0.0");
                     self.container_collisions[idx].loss = loss;

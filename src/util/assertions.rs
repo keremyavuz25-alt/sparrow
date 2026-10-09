@@ -122,8 +122,13 @@ pub fn tracker_matches_layout(ct: &CollisionTracker, l: &Layout) -> bool {
         }
         if collector.contains_entity(&BasicHazardEntity::Exterior) {
             let stored_loss = ct.get_container_loss(pk1);
-            let calc_loss = quantify_collision_poly_container(pi1.shape(), l.container().outer_cd().bbox());
-            assert_approx_eq!(f32, stored_loss, calc_loss, ulps = 5);
+            if pi1.item().idx() >= ct.frozen_item_id_threshold {
+                // Fork: frozen items are exempt from container loss.
+                assert_eq!(stored_loss, 0.0);
+            } else {
+                let calc_loss = quantify_collision_poly_container(pi1.shape(), l.container().outer_cd().bbox());
+                assert_approx_eq!(f32, stored_loss, calc_loss, ulps = 5);
+            }
         } else {
             assert_eq!(ct.get_container_loss(pk1), 0.0);
         }
