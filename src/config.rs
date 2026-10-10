@@ -68,7 +68,7 @@ pub const DEFAULT_SPARROW_CONFIG: SparrowConfig = SparrowConfig {
                 clear_y: 0.0,
                 clear_contact: 0.0,
             },
-            swap_prob: 0.0,
+            swap_prob: 0.2,
             swap_tau: 0,
         },
         large_item_ch_area_cutoff_percentile: 0.75
@@ -90,7 +90,7 @@ pub const DEFAULT_SPARROW_CONFIG: SparrowConfig = SparrowConfig {
                 clear_y: 0.0,
                 clear_contact: 0.0,
             },
-            swap_prob: 0.0,
+            swap_prob: 0.2,
             swap_tau: 0,
         },
     },
