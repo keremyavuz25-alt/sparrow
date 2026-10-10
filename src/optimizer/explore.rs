@@ -117,23 +117,27 @@ pub(crate) fn disrupt_solution(sep: &mut Separator, config: &ExplorationConfig) 
 
     // Step 1: Define what constitutes a 'large' item.
 
-    // Calculate the total convex hull area of all items, considering quantities.
+    // Calculate the total convex hull area of all movable items, considering quantities.
+    // Fork: frozen items never take part in a disruption, so they must not move the
+    // cutoff — when they are the largest ones, no movable item would reach it.
     let total_convex_hull_area: f32 = sep
         .prob
         .instance()
         .items
         .iter()
+        .filter(|(item, _)| item.idx() < frozen_threshold)
         .map(|(item, quantity)| item.shape_cd().surrogate().convex_hull_area * (*quantity as f32))
         .sum();
 
     let cutoff_threshold_area = total_convex_hull_area * config.large_item_ch_area_cutoff_percentile;
 
-    // Sort items by convex hull area in descending order.
+    // Sort movable items by convex hull area in descending order.
     let sorted_items_by_ch_area = sep
         .prob
         .instance()
         .items
         .iter()
+        .filter(|(item, _)| item.idx() < frozen_threshold)
         .sorted_by_key(|(item, _)| Reverse(OrderedFloat(item.shape_cd().surrogate().convex_hull_area)))
         .peekable();
 

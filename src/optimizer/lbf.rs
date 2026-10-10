@@ -96,6 +96,56 @@ impl LBFBuilder {
         Ok(self)
     }
 
+    /// Fork: a bounded constructive pass. Each copy is visited once; a copy
+    /// that cannot be placed stays unplaced. No exploration, compression or
+    /// separation is run. With `max_width` the strip is never widened.
+    pub fn construct_once(
+        mut self,
+        max_width: Option<f32>,
+        cancelled: impl Fn() -> bool,
+    ) -> anyhow::Result<Self> {
+        if let Some(width) = max_width {
+            self.prob.change_strip_width(width)?;
+        }
+        for &(item_idx, d_transf) in &self.frozen {
+            self.prob.place_item(SPPlacement { item_idx, d_transf });
+        }
+        let order = (0..self.instance.items.len())
+            .filter(|id| *id < self.frozen_threshold)
+            .sorted_by_cached_key(|id| {
+                let shape = self.instance.item(*id).shape_cd().as_ref();
+                Reverse(OrderedFloat(shape.surrogate().convex_hull_area * shape.diameter()))
+            })
+            .flat_map(|id| iter::repeat_n(id, self.prob.item_demand_qtys()[id]))
+            .collect_vec();
+        // Same heuristic ceiling as `place_item`, without treating it as infeasibility.
+        let width_limit = 2.0 * self.instance.items.iter()
+            .map(|(item, qty)| item.shape_cd().diameter() * *qty as f32)
+            .sum::<f32>();
+        for item_idx in order {
+            // Expansion only makes room for this copy. The bounded search can
+            // fail (e.g. a shape cannot fit the strip) without losing others.
+            for _ in 0..32 {
+                if cancelled() {
+                    return Ok(self);
+                }
+                if let Some(p) = self.find_placement(item_idx) {
+                    self.prob.place_item(p);
+                    break;
+                }
+                let next_width = self.prob.strip_width() * 1.2;
+                if max_width.is_some() || next_width >= width_limit {
+                    break;
+                }
+                self.prob.change_strip_width(next_width)?;
+            }
+        }
+        if !self.prob.layout().placed_items().is_empty() {
+            self.prob.fit_strip()?;
+        }
+        Ok(self)
+    }
+
     fn place_item(&mut self, item_idx: usize) -> anyhow::Result<()> {
         loop {
             if let Some(placement) = self.find_placement(item_idx) {
